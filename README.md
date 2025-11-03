@@ -97,38 +97,120 @@ The script will automatically download the latest data, engineer all features, t
 ## Mathematical Appendix
 
 ### A.1 The Path Signature
-Let $\mathbf{X}: [0, T] \to \mathbb{R}^d$ be a continuous path. The **signature** of $\mathbf{X}$, denoted $S(\mathbf{X})$, is a sequence of iterated integrals. The term corresponding to the multi-index $(i_1, \dots, i_k)$ is given by:
-$$ S(\mathbf{X})_{i_1, \dots, i_k} = \int_{0 < s_1 < \dots < s_k < T} \cdots \int dX_{s_1}^{i_1} \cdots dX_{s_k}^{i_k} $$
-For a discrete 2D path $\mathbf{X}_s = (s, \log(P_s))$, we approximate these terms with iterated sums. For example, the second-degree term $S_{1,2}$ is calculated as:
-$$ S_{1,2} \approx \sum_{k=1}^{N-1} X_{k}^1 \cdot (X_{k+1}^2 - X_k^2) $$
-where $X^1$ is the time component and $X^2$ is the log-price component.
 
-### A.2 Custom XGBoost Objective Functions
-To train a model in XGBoost, we must provide the first (gradient) and second (Hessian) derivatives of the loss function $L(y, \hat{y})$ with respect to the prediction $\hat{y}$. Let $\epsilon = y - \hat{y}$.
+Let $\mathbf{X}: [0, T] \to \mathbb{R}^d$ be a continuous path of finite variation.  
+The **signature** of $\mathbf{X}$, denoted $S(\mathbf{X})$, is the collection of all its *iterated integrals* of different orders:
 
-#### Asymmetric Loss
-The loss is $L_{\text{asym}} = 2\epsilon^2 \cdot \mathbb{I}_{\epsilon>0} + \epsilon^2 \cdot \mathbb{I}_{\epsilon \le 0}$.
-*   **Gradient (grad):** $g = -\frac{\partial L}{\partial \epsilon} = 
-    \begin{cases} 
-          -4\epsilon & \text{if } \epsilon > 0 \\
-          -2\epsilon & \text{if } \epsilon \le 0
-       \end{cases}$
-*   **Hessian (hess):** $h = \frac{\partial^2 L}{\partial \hat{y}^2} = 
-    \begin{cases} 
-          4 & \text{if } \epsilon > 0 \\
-          2 & \text{if } \epsilon \le 0
-       \end{cases}$
+$$
+S(\mathbf{X}) = \left(1,\, S^{(1)}(\mathbf{X}),\, S^{(2)}(\mathbf{X}),\, S^{(3)}(\mathbf{X}),\, \dots \right),
+$$
 
-#### Quantile Loss
-The loss is $L_{\alpha} = \alpha \epsilon \cdot \mathbb{I}_{\epsilon \ge 0} + (\alpha-1) \epsilon \cdot \mathbb{I}_{\epsilon < 0}$.
-*   **Gradient (grad):** $g = -\frac{\partial L}{\partial \epsilon} = 
-    \begin{cases} 
-          -\alpha & \text{if } \epsilon \ge 0 \\
-          1 - \alpha & \text{if } \epsilon < 0
-       \end{cases}$
-*   **Hessian (hess):** $h = 1$ (set to a constant for numerical stability).
+where each term $S^{(k)}(\mathbf{X})$ is a tensor in $(\mathbb{R}^d)^{\otimes k}$ defined by
+
+$$
+S^{(k)}(\mathbf{X})_{i_1, \dots, i_k}
+= \int_{0 < s_1 < \cdots < s_k < T} dX_{s_1}^{i_1} \cdots dX_{s_k}^{i_k}.
+$$
+
+The full collection $S(\mathbf{X})$ lies in the **tensor algebra**
+
+$$
+T((\mathbb{R}^d)) = \mathbb{R} \oplus \mathbb{R}^d \oplus (\mathbb{R}^d)^{\otimes 2} \oplus \cdots,
+$$
+
+and provides a complete description of the path up to *tree-like equivalence*.  
+In practice, the infinite series is truncated at degree $N$, yielding the truncated signature $S^{\le N}(\mathbf{X})$.
+
+For a discrete two-dimensional path $\mathbf{X}_s = (s, \log P_s)$, where $P_s$ denotes the price, the iterated integrals are approximated by discrete sums.  
+When truncated at degree $N = 3$, the lower-order terms are:
+
+- **Degree 1:**
+  $$
+  S_1 = \Delta s, \quad S_2 = \Delta \log P
+  $$
+
+- **Degree 2:**
+  $$
+  S_{1,2} \approx \sum_{k=1}^{N-1} X_k^{(1)} \big(X_{k+1}^{(2)} - X_k^{(2)}\big)
+  $$
+  which captures the signed area between the time and log-price components and measures path asymmetry.
+
+Higher-order terms ($S_{i_1, i_2, i_3}, \dots$) encode increasingly complex interactions between path increments.  
+We compute signatures across multiple rolling windows ($w \in \{10, 20, 40\}$ days) to capture multi-scale temporal geometry.
 
 ---
+
+### A.2 Custom XGBoost Objective Functions
+
+XGBoost requires the first and second derivatives of the loss function $L(y, \hat{y})$ with respect to the prediction $\hat{y}$.  
+Let $\epsilon = y - \hat{y}$ denote the prediction error.
+
+#### A.2.1 Asymmetric Loss
+
+To penalize under-predictions more heavily, we define
+
+$$
+L_{\text{asym}}(y, \hat{y}) = 2\epsilon^2 \cdot \mathbb{I}_{\epsilon > 0} + \epsilon^2 \cdot \mathbb{I}_{\epsilon \le 0}.
+$$
+
+Then,
+
+$$
+\text{Gradient: } g = \frac{\partial L}{\partial \hat{y}} =
+\begin{cases}
+-4\epsilon, & \text{if } \epsilon > 0 \\
+-2\epsilon, & \text{if } \epsilon \le 0
+\end{cases}
+$$
+
+$$
+\text{Hessian: } h = \frac{\partial^2 L}{\partial \hat{y}^2} =
+\begin{cases}
+4, & \text{if } \epsilon > 0 \\
+2, & \text{if } \epsilon \le 0
+\end{cases}
+$$
+
+---
+
+#### A.2.2 Quantile Loss
+
+To model conditional quantiles of the target, we use
+
+$$
+L_{\alpha}(y, \hat{y}) = \alpha \epsilon \cdot \mathbb{I}_{\epsilon \ge 0} + (\alpha - 1)\epsilon \cdot \mathbb{I}_{\epsilon < 0}.
+$$
+
+Then,
+
+$$
+\text{Gradient: } g = \frac{\partial L}{\partial \hat{y}} =
+\begin{cases}
+-\alpha, & \text{if } \epsilon \ge 0 \\
+1 - \alpha, & \text{if } \epsilon < 0
+\end{cases}
+$$
+
+$$
+\text{Hessian: } h = 1
+$$
+
+The Hessian is set to a constant (1) for numerical stability, since the theoretical value is zero.  
+Two quantile models are trained with $\alpha = 0.1$ and $\alpha = 0.9$, forming the lower and upper bounds of an 80% prediction interval.
+
+---
+
+### A.3 Ensemble Aggregation
+
+The final ensemble forecast is a weighted average of individual model predictions:
+
+$$
+\hat{y}_{\text{ens}} = \sum_{i=1}^{5} w_i \hat{y}_i, \quad
+w_i = \frac{1 / \text{RMSE}_i}{\sum_{j=1}^{5} (1 / \text{RMSE}_j)},
+$$
+
+where weights are inversely proportional to each model’s out-of-sample RMSE.
+
 
 ## Citation
 If you use this framework in your research, please cite it as follows:
